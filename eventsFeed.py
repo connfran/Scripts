@@ -115,14 +115,11 @@ def send(query):
         if retry_count > 10:
             print("FATAL ERROR: retry count exceeded")
             sys.exit(1)
-        
         try:
             request = urllib.request.Request(url='https://api.catonetworks.com/api/v1/graphql2',
                 data=json.dumps(data).encode("ascii"),headers=headers)
             response = urllib.request.urlopen(request, context=no_verify, timeout=30)
             api_call_count += 1
-            
-            result_data = response.read()
         except Exception as e:
           log(f"ERROR {retry_count}: {e}, sleeping 2 seconds then retrying")
           time.sleep(2)
