@@ -117,34 +117,28 @@ def send(query):
             sys.exit(1)
         
         try:
-            request = urllib.request.Request(
-                url='https://api.catonetworks.com/api/v1/graphql2',
-                data=json.dumps(data).encode("ascii"),
-                headers=headers
-            )
+            request = urllib.request.Request(url='https://api.catonetworks.com/api/v1/graphql2',
+                data=json.dumps(data).encode("ascii"),headers=headers)
             response = urllib.request.urlopen(request, context=no_verify, timeout=30)
             api_call_count += 1
             
             result_data = response.read()
-            
-            if result_data[:48] == b'{"errors":[{"message":"rate limit for operation:"':
-                logging.info("RATE LIMIT: sleeping 5 seconds then retrying")
-                time.sleep(5)
-                retry_count += 1
-                continue
-            
-            result = json.loads(result_data.decode('utf-8', 'replace'))
-            
-            if "errors" in result:
-                logging.error(f"API error: {result_data}")
-                return False, result
-            
-            return True, result
-        
         except Exception as e:
-            logging.error(f"ERROR {retry_count}: {e}, sleeping 2 seconds then retrying")
-            time.sleep(2)
-            retry_count += 1
+          log(f"ERROR {retry_count}: {e}, sleeping 2 seconds then retrying")
+          time.sleep(2)
+          retry_count += 1
+          continue
+        result_data = response.read()
+        if result_data[:48] == b'{"errors":[{"message":"rate limit for operation:':
+          log("RATE LIMIT sleeping 5 seconds then retrying")
+          time.sleep(5)
+          continue
+        break
+    result = json.loads(result_data.decode('utf-8','replace'))
+    if "errors" in result:
+        log(f"API error: {result_data}")
+        return False,result
+    return True,result
 
 ########################################################################################
 ########################################################################################
@@ -156,9 +150,7 @@ def build_signature(customer_id, shared_key, date, content_length):
     string_to_hash = f"POST\n{content_length}\napplication/json\n{x_headers}\n/api/logs"
     bytes_to_hash = bytes(string_to_hash, encoding="utf-8")
     decoded_key = base64.b64decode(shared_key)
-    encoded_hash = base64.b64encode(
-        hmac.new(decoded_key, bytes_to_hash, digestmod=hashlib.sha256).digest()
-    ).decode()
+    encoded_hash = base64.b64encode(hmac.new(decoded_key, bytes_to_hash, digestmod=hashlib.sha256).digest()).decode()
     authorization = "SharedKey {}:{}".format(customer_id, encoded_hash)
     return authorization
 
@@ -179,32 +171,16 @@ def post_data(customer_id, shared_key, body):
     no_verify = ssl._create_unverified_context()
     
     try:
-        if isinstance(body, str):
-            encoded_body = body.encode('utf-8')
-        else:
-            encoded_body = body
-        
-        request = urllib.request.Request(
-            url=f'https://{customer_id}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
-            data=encoded_body,
-            headers=headers,
-            method='POST'
-        )
-        
+        request = urllib.request.Request(url='https://' + customer_id + '.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
+                data=body,headers=headers)
         response = urllib.request.urlopen(request, context=no_verify)
-        return response.code
-    
     except urllib.error.URLError as e:
-        print(f"Azure API URLError: {e}")
-        sys.exit(1)
-    
+      print(f"Azure API ERROR:{e}")
+      sys.exit(1)
     except OSError as e:
-        print(f"Azure API OSError: {e}")
-        sys.exit(1)
-    
-    except Exception as e:
-        print(f"Azure API Unexpected Error: {e}")
-        sys.exit(1)
+      print(f"Azure API ERROR: {e}")
+      sys.exit(1)
+    return response.code
 
 ########################################################################################
 ########################################################################################
@@ -308,20 +284,23 @@ RUNTIME_LIMIT = sys.maxsize if options.runtime_limit is None else int(options.ru
 iteration = 1
 total_count = 0
 while True:
-    query = f'''
-    {{
-        eventsFeed(accountIDs: ["{options.ID}"], marker: "{marker}", filters: [{event_filter_string}, {event_subfilter_string}]) {{
-            marker
-            fetchedCount
-            accounts {{
-                id
-                records {{
-                    time
-                    fieldsMap
-                }}
-            }}
-        }}
-    }}'''
+    query = '''
+{
+  eventsFeed(accountIDs:[''' + options.ID + ''']
+    marker:"''' + marker + '''"
+    filters:[''' + event_filter_string + "," + event_subfilter_string + '''])
+  {
+    marker
+    fetchedCount
+    accounts {
+      id
+      records {
+        time
+        fieldsMap
+      }
+    }
+  }
+}'''
     
     logd(query)
     success, resp = send(query)
