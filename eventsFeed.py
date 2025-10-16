@@ -222,45 +222,45 @@ if options.api_key is None or options.ID is None:
 config_file = "./config.txt"
 marker = ""
 if options.config_file is None:
-    log(f"No config file specified, using default: {config_file}")
+    log(f"No config file specified, using default: {config_file}", options)
 else:
     config_file = options.config_file
-    log(f"Using config file from -c parameter: {config_file}")
+    log(f"Using config file from -c parameter: {config_file}", options)
 
 if options.marker is None:
-    log("No marker value supplied, setting marker = \"\"")
+    log("No marker value supplied, setting marker = \"\"", options)
     if os.path.isfile(config_file):
-        log(f"Found config file: {config_file}")
+        log(f"Found config file: {config_file}", options)
         with open(config_file, "r") as file_obj:
             try:
                 marker = file_obj.readlines()[0].strip()
-                log(f"Read marker from config_file: {marker}")
+                log(f"Read marker from config_file: {marker}", options)
             except IndexError as e:
                 log(str(e))
                 log(f"Couldn't read marker from config file, leaving marker as {marker}")
     else:
-        log("Config file does not exist, sticking with default marker")
+        log("Config file does not exist, sticking with default marker", options)
 else:
     marker = options.marker
-    log(f"Using marker value from -m parameter: {marker}")
+    log(f"Using marker value from -m parameter: {marker}", options)
 
 # Process event type filters
 if options.event_types is not None:
-    log(f"Event type filter parameter: {options.event_types}")
+    log(f"Event type filter parameter: {options.event_types}", options)
     event_type_strings = options.event_types.split(',')
-    log("Event type strings:" + str(event_type_strings).replace('\'', '"'))
+    log("Event type strings:" + str(event_type_strings).replace('\'', '"'), options)
     event_filter_string = '{"fieldName":"event_type","operator":"in","values":' + json.dumps(event_type_strings) + '}'
-    log(f"Event filter string: {event_filter_string}")
+    log(f"Event filter string: {event_filter_string}", options)
 else:
     event_filter_string = ""
 
 # Process event sub-type filters
 if options.event_sub_types is not None:
-    log(f"Event sub type filter parameter: {options.event_sub_types}")
+    log(f"Event sub type filter parameter: {options.event_sub_types}", options)
     event_subtype_strings = options.event_sub_types.split(',')
-    log("Event sub type strings:" + str(event_subtype_strings).replace('\'', '"'))
+    log("Event sub type strings:" + str(event_subtype_strings).replace('\'', '"'), options)
     event_subfilter_string = '{"fieldName":"event_sub_type","operator":"in","values":' + json.dumps(event_subtype_strings) + '}'
-    log(f"Event sub filter string: {event_subfilter_string}")
+    log(f"Event sub filter string: {event_subfilter_string}", options)
 else:
     event_subfilter_string = ""
 
@@ -363,7 +363,7 @@ while True:
     
     # Send to Microsoft Sentinel (unchanged)
     if options.sentinel is not None:
-        logd(f"Sending events to Azure workspace ID {sentinel_elements[0]}")
+        logd(f"Sending events to Azure workspace ID {sentinel_elements[0]}", options)
         body = []
         for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
             event["fieldsMap"]["event_timestamp"] = event["time"]
@@ -372,7 +372,7 @@ while True:
         if response_status < 200 or response_status > 299:
             print(f"Send to Azure returned {response_status}, exiting")
             sys.exit(1)
-        logd(f"Send to Azure response code: {response_status}")
+        logd(f"Send to Azure response code: {response_status}", options)
     
     # Write marker back out
     logd(f"Writing marker to {config_file}", options)
