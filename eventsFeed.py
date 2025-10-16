@@ -85,7 +85,6 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-import logging  # Added for logging.info and logging.error in send function
 from optparse import OptionParser
 
 ########################################################################################
@@ -94,17 +93,17 @@ from optparse import OptionParser
 # Helper functions and globals
 
 # Log debug output
-def log(text):
+def log(text, options):
     if options.verbose or options.veryverbose:
         print(f"LOG {datetime.datetime.utcnow()}> {text}")
 
 # Log detailed debug output
-def logd(text):
+def logd(text, options):
     if options.veryverbose:
-        log(text)
+        log(text, options)
 
 # Send GQL query string to API, return JSON
-def send(query):
+def send(query, options):
     global api_call_count
     retry_count = 0
     data = {'query': query}
@@ -113,29 +112,36 @@ def send(query):
     
     while True:
         if retry_count > 10:
-            print("FATAL ERROR: retry count exceeded")
+            log(f"FATAL ERROR: retry count exceeded ({retry_count})", options)
             sys.exit(1)
         try:
             request = urllib.request.Request(url='https://api.catonetworks.com/api/v1/graphql2',
-                data=json.dumps(data).encode("ascii"),headers=headers)
+                data=json.dumps(data).encode("ascii"), headers=headers)
             response = urllib.request.urlopen(request, context=no_verify, timeout=30)
             api_call_count += 1
+            result_data = response.read().decode('utf-8', 'replace')  # Decode here for easier handling
+            result = json.loads(result_data)  # Try to parse JSON
+            if "errors" in result:
+                for error in result["errors"]:
+                    if "rate limit" in error.get("message", "").lower():
+                        log("RATE LIMIT detected, sleeping 5 seconds then retrying", options)
+                        time.sleep(5)
+                        break  # Break to retry
+                else:
+                    # Not a rate limit error, return the error
+                    log(f"API error: {result_data}", options)
+                    return False, result
+            return True, result  # Success
+        except json.JSONDecodeError as e:
+            log(f"JSON decode error: {e}, retrying after 2 seconds", options)
+            time.sleep(2)
+            retry_count += 1
+            continue
         except Exception as e:
-          log(f"ERROR {retry_count}: {e}, sleeping 2 seconds then retrying")
-          time.sleep(2)
-          retry_count += 1
-          continue
-        result_data = response.read()
-        if result_data[:48] == b'{"errors":[{"message":"rate limit for operation:':
-          log("RATE LIMIT sleeping 5 seconds then retrying")
-          time.sleep(5)
-          continue
-        break
-    result = json.loads(result_data.decode('utf-8','replace'))
-    if "errors" in result:
-        log(f"API error: {result_data}")
-        return False,result
-    return True,result
+            log(f"ERROR {retry_count}: {e}, sleeping 2 seconds then retrying", options)
+            time.sleep(2)
+            retry_count += 1
+            continue
 
 ########################################################################################
 ########################################################################################
@@ -168,16 +174,19 @@ def post_data(customer_id, shared_key, body):
     no_verify = ssl._create_unverified_context()
     
     try:
-        request = urllib.request.Request(url='https://' + customer_id + '.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
-                data=body,headers=headers)
+        request = urllib.request.Request(url=f'https://{customer_id}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
+                data=body.encode('utf-8'), headers=headers)  # Ensure body is encoded
         response = urllib.request.urlopen(request, context=no_verify)
+        return response.getcode()  # Return status code
     except urllib.error.URLError as e:
-      print(f"Azure API ERROR:{e}")
-      sys.exit(1)
+        print(f"Azure API URLError: {e}")
+        sys.exit(1)
     except OSError as e:
-      print(f"Azure API ERROR: {e}")
-      sys.exit(1)
-    return response.code
+        print(f"Azure API OSError: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Azure API General Error: {e}")
+        sys.exit(1)
 
 ########################################################################################
 ########################################################################################
@@ -209,7 +218,7 @@ if options.api_key is None or options.ID is None:
     parser.print_help()
     sys.exit(1)
 
-# Handle config file and marker
+# Handle config file and marker (unchanged, but now passes options to log)
 config_file = "./config.txt"
 marker = ""
 if options.config_file is None:
@@ -271,55 +280,67 @@ if options.sentinel is not None:
         parser.print_help()
         sys.exit(1)
 
-# Fetch threshold
+# Fetch threshold and runtime limit (unchanged)
 FETCH_THRESHOLD = 1 if options.fetch_limit is None else int(options.fetch_limit)
-
-# Runtime threshold
 RUNTIME_LIMIT = sys.maxsize if options.runtime_limit is None else int(options.runtime_limit)
 
 # API call loop
 iteration = 1
 total_count = 0
 while True:
-    query = '''
-{
-  eventsFeed(accountIDs:[''' + options.ID + ''']
-    marker:"''' + marker + '''"
-    filters:[''' + event_filter_string + "," + event_subfilter_string + '''])
-  {
+    # Build filters array properly
+    filters_list = []
+    if event_filter_string:
+        filters_list.append(event_filter_string)
+    if event_subfilter_string:
+        filters_list.append(event_subfilter_string)
+    filters_string = ','.join(filters_list)  # Join with commas
+    filters_part = f'[{filters_string}]' if filters_list else '[]'  # Empty array if no filters
+    
+    query = f'''
+{{
+  eventsFeed(accountIDs:["{options.ID}"]  # Ensure it's a proper array
+    marker:"{marker}"
+    filters:{filters_part})
+  {{
     marker
     fetchedCount
-    accounts {
+    accounts {{
       id
-      records {
+      records {{
         time
         fieldsMap
-      }
-    }
-  }
-}'''
+      }}
+    }}
+  }}
+}}'''
     
-    logd(query)
-    success, resp = send(query)
+    logd(query, options)  # Pass options
+    success, resp = send(query, options)  # Pass options
     
     if not success:
-        print(resp)
+        print(f"API call failed: {resp}")
         sys.exit(1)
     
-    logd(resp)
-    marker = resp["data"]["eventsFeed"]["marker"]
-    fetched_count = int(resp["data"]["eventsFeed"]["fetchedCount"])
+    if "data" not in resp or "eventsFeed" not in resp["data"]:
+        log("Invalid response structure from API", options)
+        sys.exit(1)
+    
+    logd(str(resp), options)  # Pass options
+    marker = resp["data"]["eventsFeed"].get("marker", "")  # Use get() to avoid KeyError
+    fetched_count = int(resp["data"]["eventsFeed"].get("fetchedCount", 0))
     total_count += fetched_count
     line = f"Iteration: {iteration}, Fetched: {fetched_count}, Total: {total_count}, Marker: {marker}"
     
     if "accounts" in resp["data"]["eventsFeed"] and len(resp["data"]["eventsFeed"]["accounts"]) > 0:
-        records = resp["data"]["eventsFeed"]["accounts"][0]["records"]
+        records = resp["data"]["eventsFeed"]["accounts"][0].get("records", [])
         if len(records) > 0:
-            line += f" First: {records[0]['time']}, Last: {records[-1]['time']}"
+            #line += f" First: {records[0]['time']}, Last: {records[-1]['time']}"
+            line += f" First: {records[0].get('time', 'N/A')},  Last: {records[-1].get('time', 'N/A')}"
     
-    log(line)
+    log(line, options)  # Pass options
     
-    # Print output
+    # Print output (unchanged)
     if options.print_events:
         for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
             event["fieldsMap"]["event_timestamp"] = event["time"]
@@ -330,17 +351,17 @@ while True:
     
     # Network stream
     if options.stream_events is not None:
-        logd(f"Sending events to {network_elements[0]}:{network_elements[1]}")
+        logd(f"Sending events to {network_elements[0]}:{network_elements[1]}", options)
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:  # Establish connection per iteration
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:  # Auto-close socket
                 s.connect((network_elements[0], int(network_elements[1])))
-                for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
-                    event["fieldsMap"]["event_timestamp"] = event["time"]
-                    s.sendall(json.dumps(event["fieldsMap"], ensure_ascii=False).encode("utf-8"))
+                for event in records:  # Use records variable
+                    event["fieldsMap"]["event_timestamp"] = event.get("time", "")
+                    s.sendall(json.dumps(event["fieldsMap"], ensure_ascii=False).encode("utf-8") + b'\n')  # Add newline for separation
         except Exception as e:
-            log(f"Network error: {e}")
+            log(f"Network error: {e}", options)
     
-    # Send to Microsoft Sentinel
+    # Send to Microsoft Sentinel (unchanged)
     if options.sentinel is not None:
         logd(f"Sending events to Azure workspace ID {sentinel_elements[0]}")
         body = []
@@ -354,20 +375,23 @@ while True:
         logd(f"Send to Azure response code: {response_status}")
     
     # Write marker back out
-    logd(f"Writing marker to {config_file}")
-    with open(config_file, "w") as file_obj:
-        file_obj.write(marker)
+    logd(f"Writing marker to {config_file}", options)
+    try:
+        with open(config_file, "w") as file_obj:
+            file_obj.write(marker)
+    except Exception as e:
+        log(f"Error writing marker: {e}", options)
     
     iteration += 1
     
     if fetched_count < FETCH_THRESHOLD:
-        log(f"Fetched count {fetched_count} less than threshold {FETCH_THRESHOLD}, stopping")
+        log(f"Fetched count {fetched_count} less than threshold {FETCH_THRESHOLD}, stopping", options)
         break
     
     elapsed = datetime.datetime.now() - start
     if elapsed.total_seconds() > RUNTIME_LIMIT:
-        log(f"Elapsed time {elapsed.total_seconds()} exceeds runtime limit {RUNTIME_LIMIT}, stopping")
+        log(f"Elapsed time {elapsed.total_seconds()} exceeds runtime limit {RUNTIME_LIMIT}, stopping", options)
         break
 
 end = datetime.datetime.now()
-log(f"OK: {total_count} events from {api_call_count} API calls in {end - start}")
+log(f"OK: {total_count} events from {api_call_count} API calls in {end - start}", options)
