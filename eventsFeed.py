@@ -299,7 +299,7 @@ while True:
     
     query = f'''
 {{
-  eventsFeed(accountIDs:["{options.ID}"]  # Ensure it's a proper array
+  eventsFeed(accountIDs:["{options.ID}"]
     marker:"{marker}"
     filters:{filters_part})
   {{
