@@ -6,7 +6,7 @@
 #
 # Changes since 1.0:
 # - ensure_ascii=False when sending network stream
-#x
+#
 # This script takes as input an API key and account ID, and returns events in JSON format
 # from the event queue associated with that account ID. Requires events feed to be enabled
 # in the Cato management console before events will be placed in the queue. Optional parameters
@@ -25,22 +25,22 @@
 # Options:
 #   -h, --help          show this help message and exit
 #   -K API_KEY          API key
-#   -I IDAccount ID
-#   -PPrettify output
-#   -pPrint event records
+#   -I ID               Account ID
+#   -P                  Prettify output
+#   -p                  Print event records
 #   -n STREAM_EVENTS    Send events over network to host:port TCP
 #   -z SENTINEL         Send events to Sentinel customerid:sharedkey
 #   -m MARKER           Initial marker value (default is "", which means start
-# of the queue)
+#                       of the queue)
 #   -c CONFIG_FILE      Config file location (default ./config.txt)
 #   -t EVENT_TYPES      Comma-separated list of event types to filter on
 #   -s EVENT_SUB_TYPES  Comma-separated list of event sub types to filter on
 #   -f fetch_limit      Stop execution if a fetch returns less than this number
-# of events (default=1)
+#                       of events (default=1)
 #   -r RUNTIME_LIMIT    Stop execution if total runtime exceeds this many
-# seconds (default=infinite)
-#   -vPrint debug info
-#   -VPrint detailed debug info
+#                       seconds (default=infinite)
+#   -v                  Print debug info
+#   -V                  Print detailed debug info
 #
 # Examples:
 #
@@ -87,82 +87,83 @@ import urllib.parse
 import urllib.request
 from optparse import OptionParser
 
+
 ########################################################################################
 ########################################################################################
 ########################################################################################
 # Helper functions and globals
 
-# Log debug output
-def log(text, options):
+# log debug output
+def log(text):
     if options.verbose or options.veryverbose:
         print(f"LOG {datetime.datetime.utcnow()}> {text}")
 
-# Log detailed debug output
-def logd(text, options):
+# log detailed debug output
+def logd(text):
     if options.veryverbose:
-        log(text, options)
+        log(text)
 
-# Send GQL query string to API, return JSON
-def send(query, options):
+
+# send GQL query string to API, return JSON
+# if we hit a network error, retry ten times with a 2 second sleep
+def send(query):
     global api_call_count
     retry_count = 0
-    data = {'query': query}
-    headers = {'x-api-key': options.api_key, 'Content-Type': 'application/json'}
+    data = {'query':query}
+    headers = { 'x-api-key': options.api_key,'Content-Type':'application/json'}
     no_verify = ssl._create_unverified_context()
-    
     while True:
         if retry_count > 10:
-            log(f"FATAL ERROR: retry count exceeded ({retry_count})", options)
+            print("FATAL ERROR retry count exceeded")
             sys.exit(1)
         try:
             request = urllib.request.Request(url='https://api.catonetworks.com/api/v1/graphql2',
-                data=json.dumps(data).encode("ascii"), headers=headers)
+                data=json.dumps(data).encode("ascii"),headers=headers)
             response = urllib.request.urlopen(request, context=no_verify, timeout=30)
             api_call_count += 1
-            result_data = response.read().decode('utf-8', 'replace')  # Decode here for easier handling
-            result = json.loads(result_data)  # Try to parse JSON
-            if "errors" in result:
-                for error in result["errors"]:
-                    if "rate limit" in error.get("message", "").lower():
-                        log("RATE LIMIT detected, sleeping 5 seconds then retrying", options)
-                        time.sleep(5)
-                        break  # Break to retry
-                else:
-                    # Not a rate limit error, return the error
-                    log(f"API error: {result_data}", options)
-                    return False, result
-            return True, result  # Success
-        except json.JSONDecodeError as e:
-            log(f"JSON decode error: {e}, retrying after 2 seconds", options)
-            time.sleep(2)
-            retry_count += 1
-            continue
         except Exception as e:
-            log(f"ERROR {retry_count}: {e}, sleeping 2 seconds then retrying", options)
+            log(f"ERROR {retry_count}: {e}, sleeping 2 seconds then retrying")
             time.sleep(2)
             retry_count += 1
             continue
+        result_data = response.read()
+        if result_data[:48] == b'{"errors":[{"message":"rate limit for operation:':
+            log("RATE LIMIT sleeping 5 seconds then retrying")
+            time.sleep(5)
+            continue
+        break
+    result = json.loads(result_data.decode('utf-8','replace'))
+    if "errors" in result:
+        log(f"API error: {result_data}")
+        return False,result
+    return True,result
+
 
 ########################################################################################
 ########################################################################################
 ########################################################################################
 # Azure Sentinel functions
+# Taken from Microsoft sample here:
+# https://docs.microsoft.com/en-gb/azure/azure-monitor/logs/data-collector-api
+#
+# Main change is to replace requests with urllib
 
+# Build the API signature
 def build_signature(customer_id, shared_key, date, content_length):
     x_headers = 'x-ms-date:' + date
     string_to_hash = f"POST\n{content_length}\napplication/json\n{x_headers}\n/api/logs"
     bytes_to_hash = bytes(string_to_hash, encoding="utf-8")
     decoded_key = base64.b64decode(shared_key)
     encoded_hash = base64.b64encode(hmac.new(decoded_key, bytes_to_hash, digestmod=hashlib.sha256).digest()).decode()
-    authorization = "SharedKey {}:{}".format(customer_id, encoded_hash)
+    authorization = "SharedKey {}:{}".format(customer_id,encoded_hash)
     return authorization
 
+# Build and send a request to the POST API
 def post_data(customer_id, shared_key, body):
+
     rfc1123date = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
-    content_length = len(body)  # Assuming body is a string
-    
+    content_length = len(body)
     signature = build_signature(customer_id, shared_key, rfc1123date, content_length)
-    
     headers = {
         'content-type': 'application/json',
         'Authorization': signature,
@@ -170,28 +171,24 @@ def post_data(customer_id, shared_key, body):
         'Time-generated-field': 'event_timestamp',
         'x-ms-date': rfc1123date
     }
-    
     no_verify = ssl._create_unverified_context()
-    
     try:
-        request = urllib.request.Request(url=f'https://{customer_id}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
-                data=body.encode('utf-8'), headers=headers)  # Ensure body is encoded
+        request = urllib.request.Request(url='https://' + customer_id + '.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
+            data=body,headers=headers)
         response = urllib.request.urlopen(request, context=no_verify)
-        return response.getcode()  # Return status code
     except urllib.error.URLError as e:
-        print(f"Azure API URLError: {e}")
+        print(f"Azure API ERROR:{e}")
         sys.exit(1)
     except OSError as e:
-        print(f"Azure API OSError: {e}")
+        print(f"Azure API ERROR: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"Azure API General Error: {e}")
-        sys.exit(1)
+    return response.code
+
 
 ########################################################################################
 ########################################################################################
 ########################################################################################
-# Start of the main program
+# start of the main program
 
 api_call_count = 0
 start = datetime.datetime.now()
@@ -213,58 +210,59 @@ parser.add_option("-r", dest="runtime_limit", help="Stop execution if total runt
 parser.add_option("-v", dest="verbose", action="store_true", help="Print debug info")
 parser.add_option("-V", dest="veryverbose", action="store_true", help="Print detailed debug info")
 (options, args) = parser.parse_args()
-
 if options.api_key is None or options.ID is None:
     parser.print_help()
     sys.exit(1)
 
-# Handle config file and marker (unchanged, but now passes options to log)
+
+# either use the default marker or load from config file
 config_file = "./config.txt"
 marker = ""
 if options.config_file is None:
-    log(f"No config file specified, using default: {config_file}", options)
+    log(f"No config file specified, using default: {config_file}")
 else:
     config_file = options.config_file
-    log(f"Using config file from -c parameter: {config_file}", options)
-
+    log(f"Using config file from -c parameter: {config_file}")
 if options.marker is None:
-    log("No marker value supplied, setting marker = \"\"", options)
+    log("No marker value supplied, setting marker = \"\"")
+	# does the config file exist, if so load the marker value
     if os.path.isfile(config_file):
-        log(f"Found config file: {config_file}", options)
-        with open(config_file, "r") as file_obj:
+        log(f"Found config file: {config_file}")
+        with open(config_file,"r") as File:
             try:
-                marker = file_obj.readlines()[0].strip()
-                log(f"Read marker from config_file: {marker}", options)
-            except IndexError as e:
-                log(str(e))
+                marker = File.readlines()[0].strip()
+            except IndexError as E:
+                log(str(E))
                 log(f"Couldn't read marker from config file, leaving marker as {marker}")
+            log(f"Read marker from config_file: {marker}")
     else:
-        log("Config file does not exist, sticking with default marker", options)
+        log("Config file does not exist, sticking with default marker")
 else:
     marker = options.marker
-    log(f"Using marker value from -m parameter: {marker}", options)
+    log(f"Using marker value from -m parameter: {marker}")
 
-# Process event type filters
+# process event_type filters
 if options.event_types is not None:
-    log(f"Event type filter parameter: {options.event_types}", options)
+    log(f"Event type filter parameter: {options.event_types}")
     event_type_strings = options.event_types.split(',')
-    log("Event type strings:" + str(event_type_strings).replace('\'', '"'), options)
-    event_filter_string = '{"fieldName":"event_type","operator":"in","values":' + json.dumps(event_type_strings) + '}'
-    log(f"Event filter string: {event_filter_string}", options)
+    log("Event type strings:" + str(event_type_strings).replace('\'','"'))
+    event_filter_string = "{fieldName:event_type,operator:in,values:"+str(event_type_strings).replace('\'','"')+"}"
+    log(f"Event filter string: {event_filter_string}")
 else:
     event_filter_string = ""
 
-# Process event sub-type filters
+# process event_sub_type filters
 if options.event_sub_types is not None:
-    log(f"Event sub type filter parameter: {options.event_sub_types}", options)
+    log(f"Event sub type filter parameter: {options.event_sub_types}")
     event_subtype_strings = options.event_sub_types.split(',')
-    log("Event sub type strings:" + str(event_subtype_strings).replace('\'', '"'), options)
-    event_subfilter_string = '{"fieldName":"event_sub_type","operator":"in","values":' + json.dumps(event_subtype_strings) + '}'
-    log(f"Event sub filter string: {event_subfilter_string}", options)
+    log("Event sub type strings:" + str(event_subtype_strings).replace('\'','"'))
+    event_subfilter_string = "{fieldName:event_sub_type,operator:in,values:"+str(event_subtype_strings).replace('\'','"')+"}"
+    log(f"Event sub filter string: {event_subfilter_string}")
 else:
     event_subfilter_string = ""
 
-# Process network options
+
+# process network options
 if options.stream_events is not None:
     network_elements = options.stream_events.split(":")
     if len(network_elements) != 2:
@@ -272,7 +270,7 @@ if options.stream_events is not None:
         parser.print_help()
         sys.exit(1)
 
-# Process Sentinel options
+# process sentinel options
 if options.sentinel is not None:
     sentinel_elements = options.sentinel.split(":")
     if len(sentinel_elements) != 2:
@@ -280,118 +278,100 @@ if options.sentinel is not None:
         parser.print_help()
         sys.exit(1)
 
-# Fetch threshold and runtime limit (unchanged)
-FETCH_THRESHOLD = 1 if options.fetch_limit is None else int(options.fetch_limit)
-RUNTIME_LIMIT = sys.maxsize if options.runtime_limit is None else int(options.runtime_limit)
+# fetch count
+if options.fetch_limit is None:
+    FETCH_THRESHOLD = 1
+else:
+    FETCH_THRESHOLD = int(options.fetch_limit)
+
+# runtime threshold
+if options.runtime_limit is None:
+    RUNTIME_LIMIT = sys.maxsize
+else:
+    RUNTIME_LIMIT = int(options.runtime_limit)
 
 # API call loop
 iteration = 1
 total_count = 0
 while True:
-    # Build filters array properly
-    filters_list = []
-    if event_filter_string:
-        filters_list.append(event_filter_string)
-    if event_subfilter_string:
-        filters_list.append(event_subfilter_string)
-    filters_string = ','.join(filters_list)  # Join with commas
-    filters_part = f'[{filters_string}]' if filters_list else '[]'  # Empty array if no filters
-    
-    query = f'''
-{{
-  eventsFeed(accountIDs:["{options.ID}"]
-    marker:"{marker}"
-    filters:{filters_part})
-  {{
+    query = '''
+{
+  eventsFeed(accountIDs:[''' + options.ID + ''']
+    marker:"''' + marker + '''"
+    filters:[''' + event_filter_string + "," + event_subfilter_string + '''])
+  {
     marker
     fetchedCount
-    accounts {{
+    accounts {
       id
-      records {{
+      records {
         time
         fieldsMap
-      }}
-    }}
-  }}
-}}'''
-    
-    logd(query, options)  # Pass options
-    success, resp = send(query, options)  # Pass options
-    
+      }
+    }
+  }
+}'''
+
+    logd(query)
+    success,resp = send(query)
     if not success:
-        print(f"API call failed: {resp}")
+        print(resp)
         sys.exit(1)
-    
-    if "data" not in resp or "eventsFeed" not in resp["data"]:
-        log("Invalid response structure from API", options)
-        sys.exit(1)
-    
-    logd(str(resp), options)  # Pass options
-    marker = resp["data"]["eventsFeed"].get("marker", "")  # Use get() to avoid KeyError
-    fetched_count = int(resp["data"]["eventsFeed"].get("fetchedCount", 0))
+    logd(resp)
+    marker = resp["data"]["eventsFeed"]["marker"]
+    fetched_count = int(resp["data"]["eventsFeed"]["fetchedCount"])
     total_count += fetched_count
-    line = f"Iteration: {iteration}, Fetched: {fetched_count}, Total: {total_count}, Marker: {marker}"
-    
-    if "accounts" in resp["data"]["eventsFeed"] and len(resp["data"]["eventsFeed"]["accounts"]) > 0:
-        records = resp["data"]["eventsFeed"]["accounts"][0].get("records", [])
-        if len(records) > 0:
-            #line += f" First: {records[0]['time']}, Last: {records[-1]['time']}"
-            line += f" First: {records[0].get('time', 'N/A')},  Last: {records[-1].get('time', 'N/A')}"
-    
-    log(line, options)  # Pass options
-    
-    # Print output (unchanged)
+    line = f"iteration:{iteration} fetched:{fetched_count} total_count:{total_count} marker:{marker}"
+    if len(resp["data"]["eventsFeed"]["accounts"][0]["records"]) > 0:
+        line += " "+resp["data"]["eventsFeed"]["accounts"][0]["records"][0]["time"]
+        line += " "+resp["data"]["eventsFeed"]["accounts"][0]["records"][-1]["time"]
+    log(line)
+
+	# print output
     if options.print_events:
         for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
             event["fieldsMap"]["event_timestamp"] = event["time"]
             if options.prettify:
-                print(json.dumps(event["fieldsMap"], indent=2, ensure_ascii=False))
+                print(json.dumps(event["fieldsMap"],indent=2, ensure_ascii=False))
             else:
                 print(json.dumps(event["fieldsMap"], ensure_ascii=False))
-    
-    # Network stream
+
+    # network stream
     if options.stream_events is not None:
-        logd(f"Sending events to {network_elements[0]}:{network_elements[1]}", options)
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:  # Auto-close socket
-                s.connect((network_elements[0], int(network_elements[1])))
-                for event in records:  # Use records variable
-                    event["fieldsMap"]["event_timestamp"] = event.get("time", "")
-                    s.sendall(json.dumps(event["fieldsMap"], ensure_ascii=False).encode("utf-8") + b'\n')  # Add newline for separation
-        except Exception as e:
-            log(f"Network error: {e}", options)
-    
-    # Send to Microsoft Sentinel (unchanged)
+        logd(f"Sending events to {network_elements[0]}:{network_elements[1]}")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((network_elements[0], int(network_elements[1])))
+            for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
+                event["fieldsMap"]["event_timestamp"] = event["time"]
+                s.sendall(json.dumps(event["fieldsMap"], ensure_ascii=False).encode("utf-8"))
+
+    # send to Microsoft Sentinel
     if options.sentinel is not None:
-        logd(f"Sending events to Azure workspace ID {sentinel_elements[0]}", options)
+        logd(f"Sending events to Azure workspace ID {sentinel_elements[0]}")
         body = []
         for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
             event["fieldsMap"]["event_timestamp"] = event["time"]
             body.append(event["fieldsMap"])
-        response_status = post_data(sentinel_elements[0], sentinel_elements[1], json.dumps(body))
+        response_status = post_data(sentinel_elements[0],sentinel_elements[1],json.dumps(body).encode('ascii'))
         if response_status < 200 or response_status > 299:
             print(f"Send to Azure returned {response_status}, exiting")
             sys.exit(1)
-        logd(f"Send to Azure response code: {response_status}", options)
-    
-    # Write marker back out
-    logd(f"Writing marker to {config_file}", options)
-    try:
-        with open(config_file, "w") as file_obj:
-            file_obj.write(marker)
-    except Exception as e:
-        log(f"Error writing marker: {e}", options)
-    
+        logd(f"Send to Azure response code:{response_status}")
+
+    # write marker back out
+    logd("Writing marker to " + config_file)
+    with open(config_file,"w") as File:
+        File.write(marker)
+
+    # increment counter and check if we hit any limits for stopping
     iteration += 1
-    
     if fetched_count < FETCH_THRESHOLD:
-        log(f"Fetched count {fetched_count} less than threshold {FETCH_THRESHOLD}, stopping", options)
+        log(f"Fetched count {fetched_count} less than threshold {FETCH_THRESHOLD}, stopping")
         break
-    
     elapsed = datetime.datetime.now() - start
     if elapsed.total_seconds() > RUNTIME_LIMIT:
-        log(f"Elapsed time {elapsed.total_seconds()} exceeds runtime limit {RUNTIME_LIMIT}, stopping", options)
+        log(f"Elapsed time {elapsed.total_seconds()} exceeds runtime limit {RUNTIME_LIMIT}, stopping")
         break
 
 end = datetime.datetime.now()
-log(f"OK: {total_count} events from {api_call_count} API calls in {end - start}", options)
+log(f"OK {total_count} events from {api_call_count} API calls in {end-start}")
